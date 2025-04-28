@@ -1,0 +1,113 @@
+# Tema 2 - Protocol BitTorrent
+
+Aceasta tema implementeaza un sistem distribuit de sharing de fisiere utilizand MPI (Message Passing Interface) si fire de executie (threads) pentru operatii concurente. Sistemul consta dintr-un **tracker** (coordonator) si mai multi **peers** (utilizatori care pot descarca si incarca fisiere).
+
+## Structura temei
+
+Codul este organizat in doua componente principale:
+1. **Tracker-ul**:
+   - Se ocupa cu gestionarea informatiilor despre fisiere si detinatorii acestora.
+   - Coordoneaza distribuirea fisierelor intre peers.
+2. **Peers**:
+   - Fiecare peer detine si poate descarca fisiere.
+   - Comunica cu tracker-ul pentru informatii despre alti peers si fisiere.
+   - Isi partajeaza segmentele de fisiere cu alti peers.
+
+## Functionalitati implementate
+
+### Tracker
+- Primeste informatii despre fisierele detinute de peers (`MSG_INIT`).
+- Stocheaza hashurile fisierelor trimise de peers (`MSG_UPLOAD`).
+- Raspunde cererilor de listare a peers care detin segmente ale unui fisier (`MSG_LIST_PEERS`).
+- Marcheaza fisierele ca descarcate complet de un peer (`MSG_FINISH_DOWNLOAD`).
+- Notifica finalizarea tuturor operatiilor (`MSG_FINALIZE_ALL`).
+
+### Peer
+- Trimite informatii despre fisierele proprii la tracker.
+- Incarca segmentele fisierelor catre tracker.
+- Descarca segmente de fisiere de la alti peers.
+- Raspunde cererilor de segmente primite de la alti peers.
+
+## Implementare
+
+### Structuri de date
+- **TrackerFile**: Stocheaza informatii despre fisierele urmarite de tracker.
+- **FileDetails**: Stocheaza detalii despre fisierele detinute de un peer.
+- **PeerInfo**: Contine informatii despre fisierele proprii si cele solicitate de un peer.
+- **DownloadInfo**: Gestioneaza progresul descarcarii unui fisier.
+
+### Fire de executie
+- **Upload thread**: Gestioneaza cererile de segmente primite de la alti peers.
+- **Download thread**: Gestioneaza descarcarea segmentelor de la alti peers.
+
+### Mutex-uri
+- **peer_info_mutex**: Utilizat pentru sincronizarea accesului la `PeerInfo` in cadrul unui peer intre firele de upload si download.
+
+---
+
+## Explicatie: Mesaje de Initializare, Upload si ACK-uri
+
+### 1. Mesajele de Initializare (INIT)
+#### Cum se trimite mesajul INIT?
+- Fiecare peer, la initializare, trimite un mesaj `INIT` catre tracker.
+- Mesajul contine informatii despre fisierele pe care peer-ul le detine:
+  - Numarul total de fisiere.
+  - Numele fiecarui fisier.
+  - Numarul de segmente pentru fiecare fisier.
+
+### 2. Mesajele cu hashurile (UPLOAD)
+- Pentru fiecare fisier detinut de un peer si invatat la stagiul de `INIT`, tracker-ul numara cate segmente are si le aduna la totalul de segmente pe care un peer trebuie sa le trimita ca sa primeasca un `ACK` ce indica terminarea stadiului de `UPLOAD` pentru acesta.
+
+- Abia dupa ce fiecare peer si-a trimis toate segmentele de la toate fisierele, se trimit cele N `ACK`-uri pentru a permite peers sa purceada cu activarea thread-urilor de *download* si *upload*.
+
+- Logica implementata se bazeaza pe ideea de "bariera" reprezentata de al doilea `while` si de dinamica de trimitere a `ACK`-urilor.
+
+---
+
+## Explicatie: Thread-urile de Upload si Download
+
+### 1. Upload
+- Cauta in baza de date un segment cerut de un alt peer.
+- Il trimite daca il are sau raspunde cu un `NACK` in caz contrar.
+- Ruleaza indefinit pana la primirea semnalului de `TERMINATE` de la tracker.
+
+### 2. Download
+- Pentru fiecare fisier dorit de catre peer, thread-ul cere si primeste lista de peers care detin total sau partial acel fisier. Fiecare lista este insotita de numarul de segmente al acelui fisier , si hash-urile segmentelor in ordine.
+- Cand un peer primeste un hash de la alt peer , acesta este comparat cu informatia de la tracker pentru corectitudine ,conform protocolului. Daca este corect hash-ul , acesta este salvat local. 
+---
+
+## Algoritmul de selectare a peer-ului
+
+Peer-ul de la care se face cererea pentru un segment este determinat folosind un mecanism ciclic, implementat astfel:
+
+```c
+int peer_to_request = downloads[i].peers[(segment + attempts) % downloads[i].peer_count];
+
+```
+Unde:
+
+- **`segment`** este indexul segmentului care trebuie descarcat.
+- **`attempts`** este numarul incercarilor esuate pentru acest segment.
+- **`peer_count`** este numarul total de peers care pot oferi segmentele cerute.
+
+Aceasta metoda parcurge in mod ciclic lista peers-ilor, astfel incat fiecare peer sa fie ales echitabil.
+
+---
+
+### Avantajele metodei
+
+#### 1. Distribuirea uniforma a cererilor (*Load Balancing*):
+- Cererile pentru segmente sunt distribuite uniform intre peers, prevenind supraincarcarea unui singur peer.
+
+#### 2. Rezilienta la esecuri:
+- Daca un peer nu poate raspunde la cerere (de exemplu, nu are segmentul sau e indisponibil), algoritmul trece automat la urmatorul peer din lista.
+- Acest lucru asigura continuitatea descarcarii si reduce intarzierile.
+
+## 3. Resursa comuna si mutex-ul
+Thread-urile de Download si Upload se folosesc ambele de `global peer info` , deoarece atunci cand se primeste un segment , se marcheaza si intern faptul ca acum peer-ul are
+acces la fisierul din care acel segment face parte si ca poate primi cereri pentru acel fisier. 
+
+Astfel , am decis sa folosesc un mutex pentru regiunile unde se verifica sectiunea de `owned_files` in upload si unde se adauga in `owned_files` in download . Implementarea functiona corect si inainte de mutex , deoarece upload doar facea o verificare si pe baza rezultatului lua ceva din memorie.
+
+# Explicație: Distinctia dintre Peer si Seed
+ In cadrul implementarii , peer si seed sunt tinuti toti in aceeasi lista , cea de `clients_with_file`.Un seed este un peer care detine toate segmentele unui fisier si poate raspunde tuturor cererilor pentru acel fisier.
